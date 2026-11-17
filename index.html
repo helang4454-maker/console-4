@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>USB Pad – Pratonton Layout</title>
+<style>
+:root{--bg:#f2f4f7;--ring:rgba(20,30,50,.14);--knob:rgba(20,30,50,.55);--btn:rgba(20,30,50,.16);--on:#2e9e4f;--txt:#14202e;--box:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101418;--ring:rgba(255,255,255,.2);--knob:rgba(255,255,255,.67);--btn:rgba(255,255,255,.33);--on:#4caf50;--txt:#fff;--box:#1b2128}}
+:root[data-theme="dark"]{--bg:#101418;--ring:rgba(255,255,255,.2);--knob:rgba(255,255,255,.67);--btn:rgba(255,255,255,.33);--on:#4caf50;--txt:#fff;--box:#1b2128}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden;overscroll-behavior:none}
+canvas{display:block;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none}
+#bar{position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 4px);transform:translateX(-50%);display:flex;gap:6px;z-index:5}
+#bar select,#bar button{font:600 13px system-ui,sans-serif;color:var(--txt);background:var(--box);border:1px solid var(--ring);border-radius:8px;padding:5px 8px}
+#log{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 4px);transform:translateX(-50%);font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;opacity:.7;text-align:center;pointer-events:none;white-space:pre}
+#panel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(340px,90vw);background:var(--box);border:1px solid var(--ring);border-radius:12px;padding:14px;z-index:6;display:flex;flex-direction:column;gap:10px;font-size:14px;max-height:90vh;overflow:auto}
+#panel[hidden]{display:none}
+#panel label{display:flex;flex-direction:column;gap:4px}
+#panel .row{flex-direction:row;align-items:center;gap:8px}
+#panel input[type=range]{width:100%}
+#panel button{font:600 14px system-ui;padding:7px;border-radius:8px;border:1px solid var(--ring);background:var(--btn);color:var(--txt)}
+#panel small{opacity:.65}
+#rot{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:var(--bg);font-size:18px;text-align:center;padding:24px;z-index:9}
+@media (orientation:portrait){#rot{display:flex}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <select id="layout" aria-label="Layout">
+    <option value="xbox">Xbox</option>
+    <option value="ds4">DualShock 4</option>
+    <option value="race">Racing (Pedal + Stereng)</option>
+    <option value="fps">FPS / Tembak</option>
+    <option value="arcade">Arcade / Fighting</option>
+  </select>
+  <button id="gear" aria-label="Tetapan">⚙</button>
+</div>
+<div id="panel" hidden>
+  <label>Sensitiviti stereng / lihat: <b id="sensV">100%</b>
+    <input id="sens" type="range" min="50" max="200" value="100"></label>
+  <label>Had kelajuan (gas maksimum): <b id="gasV">100%</b>
+    <input id="gas" type="range" min="20" max="100" value="100"></label>
+  <label class="row"><input id="tilt" type="checkbox"> Stereng guna tilt (gyro) – layout Racing</label>
+  <label class="row"><input id="inv" type="checkbox"> Balik arah tilt</label>
+  <small>Pusingkan telefon seperti stereng. Kedudukan semasa ditetapkan sebagai tengah bila tilt dihidupkan.</small>
+  <button id="close">Tutup</button>
+</div>
+<div id="log"></div>
+<div id="rot">Pusingkan telefon ke mod landscape 📱↻</div>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d'), logEl = $('log'), sel = $('layout'), panel = $('panel');
+const S = {sens:1, gasMax:1, tilt:false, inv:false}, ROT = 2.1;
+const active = new Map(), lines = [];
+let W = 0, H = 0, ctrls = [], col = {}, base = null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---- pembina kawalan ----
+const C  = (name,label,x,y,r,o) => ({t:'b',name,label,x,y,r,down:false,...o});
+const R  = (name,label,x,y,w,h) => ({t:'r',name,label,x,y,w,h,down:false});
+const ST = (id,x,y,r) => ({t:'s',id,x,y,r,px:0,py:0});
+const PD = (name,label,x,y,w,h) => ({t:'p',name,label,x,y,w,h,v:0,out:0});
+const dpad = (x,y,d,r) => [C('UP','▲',x,y-d,r),C('DOWN','▼',x,y+d,r),C('LEFT','◀',x-d,y,r),C('RIGHT','▶',x+d,y,r)];
+const mid = u => [C('BACK','BACK',W/2-.13*u,.2*u,.055*u), C('START','START',W/2+.13*u,.2*u,.055*u)];
+
+const L = {
+  xbox: () => { const u = H; return [
+    ST('L',.32*u,.40*u,.17*u), ST('R',W-.70*u,.78*u,.15*u),
+    ...dpad(.70*u,.78*u,.12*u,.07*u),
+    C('A','A',W-.32*u,.54*u,.075*u), C('B','B',W-.18*u,.40*u,.075*u),
+    C('X','X',W-.46*u,.40*u,.075*u), C('Y','Y',W-.32*u,.26*u,.075*u),
+    C('LT','LT',.12*u,.08*u,.065*u,{trig:1}), C('LB','LB',.30*u,.08*u,.065*u),
+    C('RT','RT',W-.12*u,.08*u,.065*u,{trig:1}), C('RB','RB',W-.30*u,.08*u,.065*u),
+    ...mid(u)]; },
+
+  ds4: () => { const u = H; return [
+    ...dpad(.30*u,.36*u,.12*u,.07*u),
+    ST('L',.78*u,.74*u,.15*u), ST('R',W-.78*u,.74*u,.15*u),
+    C('A','✕',W-.30*u,.50*u,.075*u), C('B','○',W-.16*u,.36*u,.075*u),
+    C('X','□',W-.44*u,.36*u,.075*u), C('Y','△',W-.30*u,.22*u,.075*u),
+    C('LT','L2',.10*u,.08*u,.06*u,{trig:1}), C('LB','L1',.26*u,.08*u,.06*u),
+    C('RT','R2',W-.10*u,.08*u,.06*u,{trig:1}), C('RB','R1',W-.26*u,.08*u,.06*u),
+    R('TOUCHPAD','TOUCHPAD',W/2-.25*u,.14*u,.5*u,.3*u),
+    C('BACK','SHARE',W/2-.38*u,.2*u,.05*u), C('START','OPT',W/2+.38*u,.2*u,.05*u),
+    C('GUIDE','PS',W/2,.66*u,.06*u)]; },
+
+  race: () => { const u = H; return [
+    {t:'w',x:.64*u,y:.56*u,r:.34*u,rot:0,last:0,held:false},
+    C('LB','G−',.12*u,.22*u,.065*u), C('RB','G+',.12*u,.38*u,.065*u),
+    C('A','HB',.12*u,.54*u,.065*u), C('X','HORN',.12*u,.70*u,.065*u), C('Y','CAM',.12*u,.86*u,.065*u),
+    PD('LT','BREK',W-.76*u,.34*u,.26*u,.58*u),
+    PD('RT','GAS',W-.40*u,.18*u,.30*u,.74*u),
+    ...mid(u)]; },
+
+  fps: () => { const u = H; return [
+    {t:'l',x:W*.45,y:.14*u,w:W*.55,h:.86*u,px:0,py:0,on:false},
+    ST('L',.30*u,.66*u,.17*u),
+    C('LB','RUN',.12*u,.26*u,.07*u), C('RB','GRN',.30*u,.26*u,.07*u),
+    C('Y','SWAP',W-.34*u,.30*u,.065*u), C('B','CRCH',W-.14*u,.30*u,.065*u),
+    C('X','RLD',W-.50*u,.56*u,.07*u),
+    C('RT','FIRE',W-.22*u,.58*u,.12*u,{trig:1}),
+    C('LT','AIM',W-.50*u,.80*u,.075*u,{trig:1}),
+    C('A','JUMP',W-.12*u,.85*u,.075*u),
+    ...mid(u)]; },
+
+  arcade: () => { const u = H; return [
+    ...dpad(.36*u,.62*u,.16*u,.09*u),
+    C('LB','LB',.12*u,.12*u,.065*u), C('LT','LT',.30*u,.12*u,.065*u,{trig:1}),
+    C('X','X',W-.80*u,.46*u,.095*u), C('Y','Y',W-.52*u,.40*u,.095*u), C('RB','RB',W-.24*u,.46*u,.095*u),
+    C('A','A',W-.80*u,.74*u,.095*u), C('B','B',W-.52*u,.68*u,.095*u), C('RT','RT',W-.24*u,.74*u,.095*u,{trig:1}),
+    ...mid(u)]; }
+};
+
+// ---- hantar (pratonton: papar sahaja) ----
+function send(m){ lines.push(m); if (lines.length > 4) lines.shift(); logEl.textContent = lines.join("\n"); }
+function setBtn(b,d){ b.down = d; send((b.trig ? "t " : "b ") + b.name + " " + (d ? 1 : 0)); if (d && navigator.vibrate) navigator.vibrate(8); }
+function moveStick(s,x,y){
+  let nx = (x-s.x)/s.r, ny = (y-s.y)/s.r; const m = Math.hypot(nx,ny); if (m > 1){ nx /= m; ny /= m; }
+  s.px = nx; s.py = ny; send("s " + s.id + " " + nx.toFixed(3) + " " + (-ny).toFixed(3));
+}
+function setPedal(p,y){
+  p.v = clamp((p.y+p.h-y)/p.h,0,1);
+  const out = Math.round(p.v*(p.name==='RT' ? S.gasMax : 1)*100)/100;
+  if (out !== p.out){ p.out = out; send("t " + p.name + " " + out.toFixed(2)); }
+}
+function steer(w){
+  const v = clamp(w.rot/ROT*S.sens,-1,1);
+  if (Math.abs(v-w.last) > .004){ w.last = v; send("s L " + v.toFixed(3) + " 0"); }
+}
+function look(l,x,y){
+  const k = .15*H; let nx = (x-l.ox)/k*S.sens, ny = (y-l.oy)/k*S.sens;
+  const m = Math.hypot(nx,ny); if (m > 1){ nx /= m; ny /= m; }
+  l.px = nx; l.py = ny; send("s R " + nx.toFixed(3) + " " + (-ny).toFixed(3));
+}
+
+// ---- sentuhan ----
+function hit(x,y){
+  for (let i = ctrls.length-1; i >= 0; i--){
+    const c = ctrls[i]; let ok;
+    if (c.t==='b' || c.t==='s') ok = Math.hypot(x-c.x,y-c.y) <= c.r*1.25;
+    else if (c.t==='w') ok = Math.hypot(x-c.x,y-c.y) <= c.r*1.1;
+    else ok = x>=c.x && x<=c.x+c.w && y>=c.y && y<=c.y+c.h;
+    if (ok) return c;
+  }
+  return null;
+}
+const pt = e => { const r = cv.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; };
+function press(c,x,y){
+  if (c.t==='b' || c.t==='r') setBtn(c,true);
+  else if (c.t==='s') moveStick(c,x,y);
+  else if (c.t==='p') setPedal(c,y);
+  else if (c.t==='l'){ c.on = true; c.ox = x; c.oy = y; c.px = c.py = 0; }
+  else if (c.t==='w'){ c.held = true; c.a0 = Math.atan2(y-c.y,x-c.x); c.r0 = c.rot; }
+}
+function drag(c,x,y){
+  if (c.t==='s') moveStick(c,x,y);
+  else if (c.t==='p') setPedal(c,y);
+  else if (c.t==='l') look(c,x,y);
+  else if (c.t==='w' && !S.tilt){ c.rot = clamp(c.r0 + wrap(Math.atan2(y-c.y,x-c.x)-c.a0),-ROT,ROT); steer(c); }
+}
+function release(id){
+  const c = active.get(id); active.delete(id); if (!c) return;
+  if (c.t==='b' || c.t==='r') setBtn(c,false);
+  else if (c.t==='s'){ c.px = c.py = 0; send("s " + c.id + " 0 0"); }
+  else if (c.t==='p'){ c.v = 0; c.out = 0; send("t " + c.name + " 0.00"); }
+  else if (c.t==='l'){ c.on = false; c.px = c.py = 0; send("s R 0 0"); }
+  else if (c.t==='w') c.held = false;
+}
+cv.addEventListener('pointerdown', e => { cv.setPointerCapture(e.pointerId); const [x,y] = pt(e); const c = hit(x,y); if (!c) return; active.set(e.pointerId,c); press(c,x,y); draw(); });
+cv.addEventListener('pointermove', e => { const c = active.get(e.pointerId); if (c){ const [x,y] = pt(e); drag(c,x,y); draw(); } });
+['pointerup','pointercancel'].forEach(t => cv.addEventListener(t, e => { release(e.pointerId); draw(); }));
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+// ---- lukisan ----
+function circ(x,y,r,c){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle = c; ctx.fill(); }
+function rr(x,y,w,h,r){ ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x,y,w,h,r); else ctx.rect(x,y,w,h); }
+function label(t,x,y,s,faint){ ctx.font = "600 " + s + "px system-ui,sans-serif"; ctx.fillStyle = col.txt; ctx.globalAlpha = faint ? .35 : 1; ctx.fillText(t,x,y); ctx.globalAlpha = 1; }
+function draw(){
+  ctx.clearRect(0,0,W,H); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const c of ctrls){
+    if (c.t==='s'){ circ(c.x,c.y,c.r,col.ring); circ(c.x+c.px*c.r,c.y+c.py*c.r,c.r*.45,col.knob); }
+    else if (c.t==='b'){ circ(c.x,c.y,c.r,c.down ? col.on : col.btn); label(c.label,c.x,c.y,Math.min(.05*H,c.r*2.2/Math.max(2,c.label.length))); }
+    else if (c.t==='r'){ rr(c.x,c.y,c.w,c.h,.03*H); ctx.fillStyle = c.down ? col.on : col.btn; ctx.fill(); label(c.label,c.x+c.w/2,c.y+c.h/2,.04*H); }
+    else if (c.t==='p'){
+      rr(c.x,c.y,c.w,c.h,.04*H); ctx.fillStyle = col.ring; ctx.fill();
+      if (c.v > 0){ const f = c.h*c.v; rr(c.x,c.y+c.h-f,c.w,f,.04*H); ctx.fillStyle = col.on; ctx.fill(); }
+      label(c.label,c.x+c.w/2,c.y+.06*H,.045*H); label(Math.round(c.out*100)+"%",c.x+c.w/2,c.y+c.h/2,.06*H);
+    }
+    else if (c.t==='l'){
+      rr(c.x,c.y,c.w,c.h,.04*H); ctx.globalAlpha = .5; ctx.fillStyle = col.ring; ctx.fill(); ctx.globalAlpha = 1;
+      label("LIHAT",c.x+c.w/2,c.y+c.h*.5,.05*H,true);
+      if (c.on){ const k = .15*H; circ(c.ox,c.oy,k,col.ring); circ(c.ox+c.px*k,c.oy+c.py*k,.07*H,col.knob); }
+    }
+    else if (c.t==='w'){
+      ctx.save(); ctx.translate(c.x,c.y); ctx.rotate(c.rot);
+      ctx.strokeStyle = col.knob; ctx.lineWidth = c.r*.14; ctx.beginPath(); ctx.arc(0,0,c.r*.93,0,Math.PI*2); ctx.stroke();
+      ctx.lineWidth = c.r*.1; ctx.beginPath(); ctx.moveTo(-c.r*.9,0); ctx.lineTo(c.r*.9,0); ctx.moveTo(0,0); ctx.lineTo(0,c.r*.9); ctx.stroke();
+      circ(0,0,c.r*.18,col.knob); ctx.fillStyle = col.on; ctx.fillRect(-c.r*.05,-c.r*1.02,c.r*.1,c.r*.2); ctx.restore();
+    }
+  }
+}
+function colors(){ col = {ring:css('--ring'),knob:css('--knob'),btn:css('--btn'),on:css('--on'),txt:css('--txt')}; }
+function setLayout(){ active.clear(); ctrls = L[sel.value](); base = null; lines.length = 0; logEl.textContent = ""; draw(); }
+function resize(){
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  W = r.width; H = r.height; cv.width = W*d; cv.height = H*d; ctx.setTransform(d,0,0,d,0,0);
+  colors(); setLayout();
+}
+
+// ---- tetapan, tilt, auto-tengah stereng ----
+sel.onchange = setLayout;
+$('gear').onclick = () => { panel.hidden = !panel.hidden; };
+$('close').onclick = () => { panel.hidden = true; };
+$('sens').oninput = e => { S.sens = e.target.value/100; $('sensV').textContent = e.target.value + "%"; };
+$('gas').oninput  = e => { S.gasMax = e.target.value/100; $('gasV').textContent = e.target.value + "%"; };
+$('inv').onchange = e => { S.inv = e.target.checked; };
+$('tilt').onchange = async e => {
+  if (e.target.checked){
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission){
+        if (await DeviceMotionEvent.requestPermission() !== 'granted'){ e.target.checked = false; return; }
+      }
+    } catch (_) { e.target.checked = false; return; }
+    base = null;
+  }
+  S.tilt = e.target.checked;
+};
+addEventListener('devicemotion', e => {
+  if (!S.tilt) return;
+  const g = e.accelerationIncludingGravity; if (!g || g.x == null) return;
+  const a = Math.atan2(g.x,g.y); if (base == null) base = a;
+  const w = ctrls.find(c => c.t==='w'); if (!w) return;
+  w.rot = clamp(wrap(a-base)*(S.inv ? -1 : 1),-ROT,ROT); steer(w); draw();
+});
+(function tick(){
+  const w = ctrls.find(c => c.t==='w');
+  if (w && !w.held && !S.tilt && w.rot !== 0){ w.rot = Math.abs(w.rot) < .01 ? 0 : w.rot*.82; steer(w); draw(); }
+  requestAnimationFrame(tick);
+})();
+addEventListener('resize', resize);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { colors(); draw(); });
+resize();
+</script>
+</body>
+</html>
