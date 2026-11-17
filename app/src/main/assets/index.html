@@ -115,7 +115,17 @@ const L = {
 };
 
 // ---- hantar (pratonton: papar sahaja) ----
-function send(m){ lines.push(m); if (lines.length > 4) lines.shift(); logEl.textContent = lines.join("\n"); }
+function send(m){
+  lines.push(m);
+  if (lines.length > 4) lines.shift();
+  const transport = (window.AndroidBridge && window.AndroidBridge.sendInput)
+    ? "USB bridge"
+    : "Preview only";
+  logEl.textContent = lines.join("\\n") + "\\n" + transport;
+  if (window.AndroidBridge && window.AndroidBridge.sendInput) {
+    try { window.AndroidBridge.sendInput(m); } catch (_) {}
+  }
+}
 function setBtn(b,d){ b.down = d; send((b.trig ? "t " : "b ") + b.name + " " + (d ? 1 : 0)); if (d && navigator.vibrate) navigator.vibrate(8); }
 function moveStick(s,x,y){
   let nx = (x-s.x)/s.r, ny = (y-s.y)/s.r; const m = Math.hypot(nx,ny); if (m > 1){ nx /= m; ny /= m; }
